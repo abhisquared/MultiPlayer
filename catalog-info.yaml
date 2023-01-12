@@ -1,0 +1,10 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: MultiPlayer
+  annotations:
+    github.com/project-slug: pal-kgec/MultiPlayer
+spec:
+  type: other
+  lifecycle: unknown
+  owner: guests
