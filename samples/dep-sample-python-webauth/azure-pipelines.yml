@@ -1,0 +1,196 @@
+trigger:
+- master
+- feature/*
+- '*'
+
+variables:
+  ProjectStream: exam
+  WorkStream: app
+  Placement: pub
+  AppNameSuffix: test-python-websso
+
+  ArtifactsDirectory: $(Pipeline.Workspace)
+  ArtifactStagingDirectory: $(ArtifactsDirectory)/dist
+  ArtifactSourceStagingDirectory: $(ArtifactsDirectory)/sdist
+  DeployManifestName: stratos-deploy.yml
+  IsMasterBranch: $[eq(variables['Build.SourceBranch'], 'refs/heads/master')]
+
+stages:
+- stage: Build
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      matrix:
+        Python38:
+          python.version: '3.8'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(python.version)'
+        displayName: 'Use Python $(python.version)'
+
+    - task: PipAuthenticate@1
+      displayName: 'Authenticate pip'
+      inputs:
+        artifactFeeds: 4b55d100-8e50-46cc-ab7b-ac35eaf91bfe/SEDP-Python
+        onlyAddExtraIndex: true
+
+    - script: |
+        python -m venv antenv
+        source antenv/bin/activate
+        python -m pip install --upgrade pip keyring artifacts-keyring
+        pip install -r requirements.txt
+      displayName: 'Install dependencies'
+
+    # - script: |
+    #     source antenv/bin/activate
+    #     pip install pytest pytest-azurepipelines
+    #     pip install -e .
+    #     pytest
+    #   displayName: 'Run tests'
+
+    - task: CopyFiles@2
+      displayName: "Copy app files"
+      inputs:
+        Contents: |
+          **/*
+          !.git/**/*
+          !.pytest_cache/**/*
+          !__pycache__/**/*
+          !**/.pytest_cache/**/*
+          !**/__pycache__/**/*
+          !setup.py
+        targetFolder: $(ArtifactSourceStagingDirectory)
+
+    - task: ArchiveFiles@2
+      displayName: "Archive files"
+      inputs:
+        rootFolderOrFile: "$(ArtifactSourceStagingDirectory)"
+        includeRootFolder: false
+        archiveFile: "$(ArtifactStagingDirectory)/app.zip"
+
+    - task: CopyFiles@2
+      displayName: "Copy manifests"
+      inputs:
+        Contents: |
+          stratos*.yml
+        targetFolder: $(ArtifactStagingDirectory)
+
+    - publish: $(ArtifactStagingDirectory)
+      artifact: dist
+- stage: DeploySandbox
+  condition: "succeeded('Build')"
+  pool:
+    vmImage: 'ubuntu-latest'
+  variables:
+  - group: EXAM_APP_SBX
+  - name: Region
+    value: euw
+  - name: IngressHostName
+    value: python-test-webauthsso-sbx.dev.stratos.shell
+  jobs:
+  - deployment: Sandbox
+    environment: sbx
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: qetza.replacetokens.replacetokens-task.replacetokens@3
+            inputs:
+              targetFiles: '$(ArtifactStagingDirectory)/$(DeployManifestName)'
+              actionOnMissing: 'fail'
+              verbosity: 'detailed'
+
+          - task: sedp-deploy-dev@0
+            displayName: Provision infrastructure
+            inputs:
+              manifestpath: '$(ArtifactStagingDirectory)/$(DeployManifestName)'
+              environment: $(Environment.Name)
+              token: $(STRATOS_DEPLOYMENT_TOKEN)
+
+          - task: AzureWebApp@1
+            displayName: Deploy app
+            inputs:
+              azureSubscription: EXAM-APP-PUB-SBX
+              appType: 'webAppLinux'
+              appName: "$(ProjectStream)-$(WorkStream)-$(Placement)-$(Environment.Name)-$(Region)-100-appw-$(AppNameSuffix)"
+              package: '$(ArtifactStagingDirectory)/**/*.zip'
+              deploymentMethod: zipDeploy
+              startupCommand: "gunicorn --bind=0.0.0.0 --timeout 600 --chdir webapp app:app"
+
+# - stage: DeployDevelopment
+#   condition: "succeeded('Build')"
+#   # condition: "and(succeeded('DeploySandbox'), eq(variables.IsMasterBranch, true))"
+#   pool:
+#     vmImage: 'ubuntu-latest'
+#   variables:
+#   - group: EXAM_APP_DEV
+#   - name: Region
+#     value: euw
+#   - name: IngressHostName
+#     value: python-sample-webauthsso.dev.stratos.shell
+#   jobs:
+#   - deployment: Development
+#     environment: dev
+#     strategy:
+#       runOnce:
+#         deploy:
+#           steps:
+#           - task: qetza.replacetokens.replacetokens-task.replacetokens@3
+#             inputs:
+#               targetFiles: '$(ArtifactStagingDirectory)/$(DeployManifestName)'
+#               actionOnMissing: 'fail'
+#               verbosity: 'detailed'
+              
+#           - task: sedp-deploy-dev@0
+#             displayName: Provision infrastructure
+#             inputs:
+#               manifestpath: '$(ArtifactStagingDirectory)/$(DeployManifestName)'
+#               environment: $(Environment.Name)
+#               token: $(STRATOS_DEPLOYMENT_TOKEN)
+
+#           - task: AzureWebApp@1
+#             displayName: Deploy app
+#             inputs:
+#               # azureSubscription: "$(ProjectStream)-$(WorkStream)-$(Placement)-$(Environment.Name)"
+#               azureSubscription: EXAM-APP-PUB-DEV
+#               appType: 'webAppLinux'
+#               appName: "$(ProjectStream)-$(WorkStream)-$(Placement)-$(Environment.Name)-$(Region)-100-appw-$(AppNameSuffix)"
+#               package: '$(ArtifactStagingDirectory)/**/*.zip'
+#               deploymentMethod: zipDeploy
+#               startupCommand: "gunicorn --bind=0.0.0.0 --timeout 600 --chdir webapp app:app"
+
+# - stage: DeployProduction
+#   condition: "and(succeeded('DeployDevelopment'), eq(variables.IsMasterBranch, true))"
+#   pool:
+#     vmImage: 'ubuntu-latest'
+#   variables:
+#   - group: EXAM_APP_PRD
+#   - name: Region
+#     value: eun
+#   - name: IngressHostName
+#     value: python-sample-webauthsoo.stratos.shell
+#   jobs:
+#   - deployment: Production
+#     environment: prd
+#     strategy:
+#       runOnce:
+#         deploy:
+#           steps:
+#           - task: sedp-deploy-dev@0
+#             displayName: Provision infrastructure
+#             inputs:
+#               manifestpath: '$(ArtifactStagingDirectory)/$(DeployManifestName)'
+#               environment: $(Environment.Name)
+#               token: $(STRATOS_DEPLOYMENT_TOKEN)
+
+#           - task: AzureWebApp@1
+#             displayName: Deploy app
+#             inputs:
+#               azureSubscription: EXAM-APP-PUB-PRD
+#               appType: 'webAppLinux'
+#               appName: "$(ProjectStream)-$(WorkStream)-$(Placement)-$(Environment.Name)-$(Region)-100-appw-$(AppNameSuffix)"
+#               package: '$(ArtifactStagingDirectory)/**/*.zip'
+#               deploymentMethod: runFromPackage
